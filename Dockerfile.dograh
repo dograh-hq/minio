@@ -1,0 +1,42 @@
+# Dograh's MinIO image, built from chainguard-forks/minio source (AGPLv3) by
+# .github/workflows/dograh-image.yml. The build context is the upstream source
+# tree checked out at a RELEASE.* tag; .dockerignore drops .git, so the commit
+# id comes in as a build arg.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG RELEASE_TAG
+ARG COMMIT_ID
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Same ldflags as buildscripts/gen-ldflags.go, derived from the release tag
+# (RELEASE.2026-09-22T19-25-18Z -> Version 2026-09-22T19:25:18Z).
+RUN set -eu; \
+    ts="${RELEASE_TAG#RELEASE.}"; \
+    version="$(echo "$ts" | sed -E 's/T([0-9]{2})-([0-9]{2})-([0-9]{2})Z$/T\1:\2:\3Z/')"; \
+    pkg=github.com/chainguard-forks/minio/cmd; \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags kqueue -trimpath \
+      -ldflags "-s -w -X $pkg.Version=$version -X $pkg.CopyrightYear=${ts%%-*} -X $pkg.ReleaseTag=$RELEASE_TAG -X $pkg.CommitID=$COMMIT_ID -X $pkg.ShortCommitID=$(echo "$COMMIT_ID" | cut -c1-12)" \
+      -o /out/minio .
+
+# curl keeps the `curl -f .../minio/health/live` healthchecks in dograh's
+# compose files working; coreutils provides the chroot --userspec used by
+# docker-entrypoint.sh.
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates curl coreutils
+
+COPY --from=build /out/minio /usr/bin/minio
+COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+COPY LICENSE CREDITS /licenses/
+
+EXPOSE 9000
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+CMD ["minio"]
