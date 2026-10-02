@@ -1,5 +1,5 @@
 # Builds dograh's MinIO image from a chainguard-forks/minio release tag and
-# publishes it as dograhai/minio:<tag> and ghcr.io/dograh-hq/minio:<tag>.
+# publishes it as dograhai/minio:<date> and ghcr.io/dograh-hq/minio:<date>.
 #
 # The weekly run picks up the newest upstream RELEASE.* tag and exits early if
 # it has already been published. Each published tag gets a GitHub release here
@@ -39,29 +39,35 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # Image tag is the upstream release date (RELEASE.2026-09-22T19-25-18Z ->
+      # 2026.09.22); a later upstream release on the same day gets -2, -3, ...
       - name: Resolve release tag
         id: tag
         env:
           INPUT_TAG: ${{ inputs.release_tag }}
         run: |
-          tag="$INPUT_TAG"
-          if [ -z "$tag" ]; then
-            tag=$(git ls-remote --tags --refs "https://github.com/$UPSTREAM" 'RELEASE.*' \
-              | sed 's#.*refs/tags/##' | sort | tail -1)
-          fi
-          if ! echo "$tag" | grep -Eq '^RELEASE\.[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$'; then
-            echo "::error::Unexpected release tag '$tag'"
+          upstream_tags=$(git ls-remote --tags --refs "https://github.com/$UPSTREAM" 'RELEASE.*' \
+            | sed 's#.*refs/tags/##' \
+            | grep -E '^RELEASE\.[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$' | sort)
+          tag="${INPUT_TAG:-$(echo "$upstream_tags" | tail -1)}"
+          day="${tag:8:10}"
+          n=$(echo "$upstream_tags" | grep "^RELEASE\.${day}T" | grep -n -x -F "$tag" | cut -d: -f1)
+          if [ -z "$n" ]; then
+            echo "::error::'$tag' is not a RELEASE.* tag of $UPSTREAM"
             exit 1
           fi
+          image_tag="${day//-/.}"
+          if [ "$n" -gt 1 ]; then image_tag="$image_tag-$n"; fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $tag"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "Upstream $tag -> image tag $image_tag"
 
       - name: Check whether already published
         id: check
         run: |
-          if gh release view "dograh-${{ steps.tag.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "${{ steps.tag.outputs.image_tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "dograh-${{ steps.tag.outputs.tag }} already published, nothing to do."
+            echo "${{ steps.tag.outputs.image_tag }} already published, nothing to do."
           fi
 
       - name: Check out build files
@@ -118,13 +124,13 @@ jobs:
             RELEASE_TAG=${{ steps.tag.outputs.tag }}
             COMMIT_ID=${{ steps.src.outputs.commit }}
           tags: |
-            ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.tag }}
-            ${{ env.GHCR_IMAGE }}:${{ steps.tag.outputs.tag }}
+            ${{ env.DOCKERHUB_IMAGE }}:${{ steps.tag.outputs.image_tag }}
+            ${{ env.GHCR_IMAGE }}:${{ steps.tag.outputs.image_tag }}
           labels: |
             org.opencontainers.image.title=minio
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.src.outputs.commit }}
-            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.image_tag }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
             org.opencontainers.image.description=MinIO built from https://github.com/${{ env.UPSTREAM }}/tree/${{ steps.tag.outputs.tag }}
 
@@ -132,16 +138,17 @@ jobs:
         if: steps.check.outputs.published != 'true'
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
           COMMIT: ${{ steps.src.outputs.commit }}
         run: |
-          git -C src archive --format=tar.gz --prefix="minio-$TAG/" -o "$PWD/minio-$TAG-source.tar.gz" HEAD
-          gh release create "dograh-$TAG" "minio-$TAG-source.tar.gz" \
+          git -C src archive --format=tar.gz --prefix="minio-$IMAGE_TAG/" -o "$PWD/minio-$IMAGE_TAG-source.tar.gz" HEAD
+          gh release create "$IMAGE_TAG" "minio-$IMAGE_TAG-source.tar.gz" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "$TAG" \
-            --notes "MinIO $TAG built from [$UPSTREAM@${COMMIT:0:12}](https://github.com/$UPSTREAM/commit/$COMMIT) with \`Dockerfile.dograh\`.
+            --title "$IMAGE_TAG" \
+            --notes "MinIO \`$TAG\` built from [$UPSTREAM@${COMMIT:0:12}](https://github.com/$UPSTREAM/commit/$COMMIT) with \`Dockerfile.dograh\`.
 
-          Images: \`$DOCKERHUB_IMAGE:$TAG\`, \`$GHCR_IMAGE:$TAG\` (linux/amd64, linux/arm64).
+          Images: \`$DOCKERHUB_IMAGE:$IMAGE_TAG\`, \`$GHCR_IMAGE:$IMAGE_TAG\` (linux/amd64, linux/arm64).
 
           The attached tarball is the complete corresponding source (AGPL-3.0-or-later)."
 
